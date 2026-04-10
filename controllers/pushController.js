@@ -8,18 +8,20 @@ export const savePushSubscription = async (req, res) => {
     try {
         const userId = req.id;
         const sub = req.body;
+
         if (!sub?.endpoint || !sub?.keys?.p256dh || !sub?.keys?.auth) {
             return res.status(400).json({ success: false, message: "Invalid subscription data" });
         }
 
-        const existing = await PushSubscription.findOne({ endpoint: sub.endpoint });
-
-        if (!existing) {
-            await PushSubscription.create({
+        // Always upsert , reassign to current user if endpoint already exists
+        await PushSubscription.findOneAndUpdate(
+            { endpoint: sub.endpoint },
+            {
                 ...sub,
                 user: userId || null,
-            });
-        }
+            },
+            { upsert: true, new: true }
+        );
 
         res.status(200).json({ success: true, message: "Subscription saved" });
     } catch (error) {

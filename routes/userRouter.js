@@ -6,7 +6,7 @@ const userRouter = express.Router();
 userRouter.post("/register", userRegister);
 userRouter.post("/login", userLogin);
 userRouter.post("/google", googleAuth);
-userRouter.post("/logout", userLogout);
+userRouter.post("/logout", userAuthenticated, userLogout);
 userRouter.get("/user-details", userAuthenticated, getUserDetails);
 userRouter.patch("/user-details", userAuthenticated, updateUserDetails)
 userRouter.patch("/update-timezone", userAuthenticated, updateUserTimezone);

@@ -3,6 +3,7 @@ import { User } from "../models/userModel.js";
 import bcrypt from "bcrypt";
 import { OAuth2Client } from "google-auth-library";
 import { configDotenv } from "dotenv";
+import { PushSubscription } from "../models/pushSubscription.js";
 configDotenv();
 
 export const userRegister = async (req, res) => {
@@ -118,11 +119,21 @@ export const googleAuth = async (req, res) => {
 
 export const userLogout = async (req, res) => {
     try {
+        const userId = req.id; // now available via middleware
+
+        if (userId) {
+            await PushSubscription.updateMany(
+                { user: userId },
+                { $set: { user: null } }
+            );
+        }
+
         res.clearCookie("user_token", {
             httpOnly: true,
             secure: process.env.NODE_ENV === "production",
             sameSite: process.env.NODE_ENV === "production" ? "None" : "Lax",
         });
+
         return res.json({ success: true, message: "Logout successful!" });
     } catch (error) {
         console.log(error);
