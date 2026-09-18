@@ -8,6 +8,8 @@ declare namespace NodeJS {
         JWT_SECRET_KEY: string;
         CRON_SECRET: string;
         TOGETHER_API_KEY: string;
+        GEMINI_API_KEY: string;
+        AI_MODEL: string;
 
         GOOGLE_CLIENT_ID: string;
         GOOGLE_CLIENT_SECRET: string;

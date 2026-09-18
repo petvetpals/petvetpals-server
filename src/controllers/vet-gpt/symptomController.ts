@@ -1,6 +1,9 @@
 import { NextFunction, Request, Response } from "express";
 import { SymptomReport } from "../../models/vet-gpt/SymptomReport.js";
 import { conditions, GenerateSymptomReportDTO, symptoms } from "../../types/vet-gpt.types.js";
+import { GenerateContentResult, GoogleGenerativeAI } from "@google/generative-ai";
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
 
 export const generateSymptomReport = async (req: Request<{}, {}, GenerateSymptomReportDTO>, res: Response, next: NextFunction) => {
     try {
@@ -48,26 +51,99 @@ export const generateSymptomReport = async (req: Request<{}, {}, GenerateSymptom
             "Thank you for using Vet GPT - Powered by PetVetPals."
             `.trim();
 
-        const response = await fetch('https://api.together.xyz/v1/chat/completions', {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${process.env.TOGETHER_API_KEY}`,
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                model: 'mistralai/Mixtral-8x7B-Instruct-v0.1',
-                messages: [
-                    { role: 'system', content: 'You are a helpful veterinary assistant.' },
-                    { role: 'user', content: prompt }
-                ],
-                temperature: 0.7
-            })
+        const model = genAI.getGenerativeModel({
+            model: process.env.AI_MODEL,
+            generationConfig: {
+                temperature: 0.4,
+            }
         });
-        const data = await response.json();
-        // console.log("Symptom AI data:", data)
-        const content = data.choices?.[0]?.message?.content || 'No recommendation returned.';
-        console.log("CONTENT:", content)
-        return res.status(200).json({ success: true, recommendation: content });
+
+        const generateWithRetry = async (
+            prompt: string,
+            retries = 3
+        ): Promise<GenerateContentResult> => {
+
+            for (let attempt = 0; attempt < retries; attempt++) {
+                try {
+                    return await model.generateContent(prompt);
+
+                } catch (error: unknown) {
+
+                    const message =
+                        error instanceof Error
+                            ? error.message
+                            : "Unknown error";
+
+                    console.error(
+                        `Gemini attempt ${attempt + 1}/${retries} failed:`,
+                        message
+                    );
+
+                    const isAIError =
+                        message.includes("503") ||
+                        message.includes("429") ||
+                        message.includes("500") ||
+                        message.includes("high demand") ||
+                        message.includes("Service Unavailable") ||
+                        message.includes("Too Many Requests") ||
+                        message.toLowerCase().includes("quota");
+
+                    // Don't retry things like invalid API keys,
+                    // malformed requests, etc.
+                    if (!isAIError) {
+                        throw error;
+                    }
+
+                    // Last attempt failed
+                    if (attempt === retries - 1) {
+                        throw new Error(
+                            "VetGPT is currently busy. Please try again later."
+                        );
+                    }
+
+                    // Exponential-ish backoff:
+                    // 1s → 2s → 3s
+                    await new Promise((resolve) =>
+                        setTimeout(resolve, 1000 * (attempt + 1))
+                    );
+                }
+            }
+
+            throw new Error("Failed to generate symptom report.");
+        };
+
+        try {
+            const result = await generateWithRetry(prompt);
+
+            const content = result.response.text();
+
+            console.log("SYMPTOM REPORT:", content);
+
+            return res.status(200).json({
+                success: true,
+                recommendation: content
+            });
+
+        } catch (error: unknown) {
+
+            console.error("Gemini API Error:", error);
+
+            const message =
+                error instanceof Error
+                    ? error.message
+                    : "Something went wrong while generating the report.";
+
+            const isBusyError =
+                message.includes("currently busy") ||
+                message.includes("503") ||
+                message.includes("429") ||
+                message.toLowerCase().includes("quota");
+
+            return res.status(isBusyError ? 503 : 500).json({
+                success: false,
+                message
+            });
+        }
     } catch (error: unknown) {
         next(error);
     }
