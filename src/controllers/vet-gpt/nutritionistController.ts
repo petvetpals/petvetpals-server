@@ -1,7 +1,8 @@
 import { NextFunction, Request, Response } from "express";
-import { extractJSON } from "../../utils/extractJson.js";
-import fetch from "node-fetch";
 import { NutritionReportDTO } from "../../types/vet-gpt.types.js";
+import { GenerateContentResult, GoogleGenerativeAI } from "@google/generative-ai";
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
 
 export const generateNutritionReport = async (req: Request<{}, {}, NutritionReportDTO>, res: Response, next: NextFunction) => {
     try {
@@ -47,39 +48,130 @@ export const generateNutritionReport = async (req: Request<{}, {}, NutritionRepo
         `
             ;
 
-        const aiResponse = await fetch("https://api.together.xyz/v1/chat/completions", {
-            method: "POST",
-            headers: {
-                "Authorization": `Bearer ${process.env.TOGETHER_API_KEY}`,
-                "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-                // model: "meta-llama/Llama-3-8b-chat-hf",
-                model: "mistralai/Mixtral-8x7B-Instruct-v0.1",
-                prompt,
-                max_tokens: 1500,
-                temperature: 0.7,
-            }),
+        const model = genAI.getGenerativeModel({
+            model: process.env.AI_MODEL as string,
+            generationConfig: {
+                temperature: 0.4,
+                responseMimeType: "application/json"
+            }
         });
-        // console.log("Nutrition AI RESPONSE:", aiResponse)
-        const data = await aiResponse.json();
-        // console.log("Nutrition AI data:", data)
-        const rawOutput = data?.choices?.[0]?.text;
-        let plan = extractJSON(rawOutput);
 
-        // if (!plan) {
-        //     console.warn("AI output invalid JSON — attempting repair...");
-        //     plan = await repairJSONWithFreeModel(rawOutput);
-        // }
+        const generateWithRetry = async (
+            prompt: string,
+            retries = 3
+        ): Promise<GenerateContentResult> => {
 
-        if (!plan) {
-            console.error("Model failed generating nutrition plan. Returning empty nutrition plan.");
-            // plan = emptyNutritionPlan;
+            for (let attempt = 0; attempt < retries; attempt++) {
+                try {
+                    return await model.generateContent(prompt);
+
+                } catch (error: unknown) {
+
+                    const message =
+                        error instanceof Error
+                            ? error.message
+                            : "Unknown error";
+
+                    console.error(
+                        `Gemini nutrition attempt ${attempt + 1}/${retries} failed:`,
+                        message
+                    );
+
+                    const lowerMessage = message.toLowerCase();
+
+                    const isAIError =
+                        message.includes("503") ||
+                        message.includes("429") ||
+                        message.includes("500") ||
+                        lowerMessage.includes("high demand") ||
+                        lowerMessage.includes("service unavailable") ||
+                        lowerMessage.includes("too many requests") ||
+                        lowerMessage.includes("quota");
+
+                    // Don't retry non-AI/service errors such as
+                    // invalid API keys or malformed requests.
+                    if (!isAIError) {
+                        throw error;
+                    }
+
+                    // Last retry
+                    if (attempt === retries - 1) {
+                        throw new Error(
+                            "Vet GPT is currently busy. Please try again later."
+                        );
+                    }
+
+                    // Backoff: 1s → 2s → 3s
+                    await new Promise((resolve) =>
+                        setTimeout(resolve, 1000 * (attempt + 1))
+                    );
+                }
+            }
+
+            throw new Error(
+                "Failed to generate nutrition plan."
+            );
+        };
+
+        try {
+            const result = await generateWithRetry(prompt);
+
+            const rawOutput = result.response.text();
+
+            console.log("NUTRITION RAW OUTPUT:", rawOutput);
+
+            let plan;
+
+            try {
+                plan = JSON.parse(rawOutput);
+            } catch (parseError) {
+                console.error(
+                    "Failed to parse Gemini nutrition JSON:",
+                    parseError
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    message:
+                        "Vet GPT returned an invalid nutrition plan. Please try again."
+                });
+            }
+
+            console.log("NUTRITION PLAN:", plan);
+
+            return res.status(200).json({
+                success: true,
+                plan
+            });
+
+        } catch (error: unknown) {
+
+            console.error(
+                "Gemini Nutrition API Error:",
+                error
+            );
+
+            const message =
+                error instanceof Error
+                    ? error.message
+                    : "Something went wrong while generating the nutrition plan.";
+
+            const lowerMessage = message.toLowerCase();
+
+            const isBusyError =
+                message.includes("503") ||
+                message.includes("429") ||
+                lowerMessage.includes("currently busy") ||
+                lowerMessage.includes("quota") ||
+                lowerMessage.includes("high demand");
+
+            return res.status(
+                isBusyError ? 503 : 500
+            ).json({
+                success: false,
+                message
+            });
         }
-
-        console.log("PLAN:", plan)
-
-        return res.json({ success: true, plan });
     } catch (error: unknown) {
         next(error);
     }
