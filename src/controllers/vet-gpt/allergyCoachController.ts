@@ -2,6 +2,9 @@ import { NextFunction, Request, Response } from "express";
 import { extractJSON } from "../../utils/extractJson.js";
 import { AllergyItchReport } from "../../models/vet-gpt/AllergyItchModel.js";
 import { AllergyReportDTO, SaveAllergyReportDTO } from "../../types/vet-gpt.types.js";
+import { GenerateContentResult, GoogleGenerativeAI } from "@google/generative-ai";
+
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY)
 
 export const generateAllergyReport = async (req: Request<{}, {}, AllergyReportDTO>, res: Response, next: NextFunction) => {
     try {
@@ -85,28 +88,140 @@ export const generateAllergyReport = async (req: Request<{}, {}, AllergyReportDT
         Do not repeat instructions, do not include explanations outside the JSON. Be professional, precise, and thorough, prioritizing ${pet.name}'s safety, comfort, and risk prevention.
         `;
 
-        const aiResponse = await fetch("https://api.together.xyz/v1/chat/completions", {
-            method: "POST",
-            headers: {
-                "Authorization": `Bearer ${process.env.TOGETHER_API_KEY}`,
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify({
-                // model: "meta-llama/Llama-3-8b-chat-hf",
-                model: "mistralai/Mixtral-8x7B-Instruct-v0.1",
-                prompt,
-                max_tokens: 1500,
-                temperature: 0.7,
-            })
-        })
-        // console.log("Allergy Coach AI RESPONSE:", aiResponse)
-        const data = await aiResponse.json();
-        // console.log("Allergy Coach AI data:", data)
-        const rawOutput = data?.choices?.[0]?.text;
-        // console.log("Raw allergy output:", rawOutput)
-        const coach_response = extractJSON(rawOutput);
-        console.log("Coach Response:", coach_response);
-        return res.status(200).json({ success: true, coach_response })
+        const model = genAI.getGenerativeModel({
+            model: process.env.AI_MODEL as string,
+            generationConfig: {
+                temperature: 0.4,
+                responseMimeType: "application/json"
+            }
+        });
+
+        const generateWithRetry = async (
+            prompt: string,
+            retries = 3
+        ): Promise<GenerateContentResult> => {
+
+            for (let attempt = 0; attempt < retries; attempt++) {
+                try {
+                    return await model.generateContent(prompt);
+
+                } catch (error: unknown) {
+
+                    const message =
+                        error instanceof Error
+                            ? error.message
+                            : "Unknown error";
+
+                    console.error(
+                        `Gemini allergy attempt ${attempt + 1}/${retries} failed:`,
+                        message
+                    );
+
+                    const lowerMessage = message.toLowerCase();
+
+                    const isAIError =
+                        message.includes("503") ||
+                        message.includes("429") ||
+                        message.includes("500") ||
+                        lowerMessage.includes("high demand") ||
+                        lowerMessage.includes("service unavailable") ||
+                        lowerMessage.includes("too many requests") ||
+                        lowerMessage.includes("quota");
+
+                    // Don't retry errors that are not temporary
+                    // Gemini/service errors.
+                    if (!isAIError) {
+                        throw error;
+                    }
+
+                    // All retries exhausted
+                    if (attempt === retries - 1) {
+                        throw new Error(
+                            "Vet GPT is currently busy. Please try again later."
+                        );
+                    }
+
+                    // Backoff:
+                    // Attempt 1 → wait 1s
+                    // Attempt 2 → wait 2s
+                    await new Promise((resolve) =>
+                        setTimeout(resolve, 1000 * (attempt + 1))
+                    );
+                }
+            }
+
+            throw new Error(
+                "Failed to generate allergy report."
+            );
+        };
+
+        try {
+            const result = await generateWithRetry(prompt);
+
+            const rawOutput = result.response.text();
+
+            console.log(
+                "ALLERGY RAW OUTPUT:",
+                rawOutput
+            );
+
+            let coach_response;
+
+            try {
+                coach_response = JSON.parse(rawOutput);
+            } catch (parseError) {
+
+                console.error(
+                    "Failed to parse Gemini allergy JSON:",
+                    parseError
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    message:
+                        "Vet GPT returned an invalid allergy report. Please try again."
+                });
+            }
+
+            console.log(
+                "Coach Response:",
+                coach_response
+            );
+
+            return res.status(200).json({
+                success: true,
+                coach_response
+            });
+
+        } catch (error: unknown) {
+
+            console.error(
+                "Gemini Allergy API Error:",
+                error
+            );
+
+            const message =
+                error instanceof Error
+                    ? error.message
+                    : "Something went wrong while generating the allergy report.";
+
+            const lowerMessage = message.toLowerCase();
+
+            const isBusyError =
+                message.includes("503") ||
+                message.includes("429") ||
+                lowerMessage.includes("currently busy") ||
+                lowerMessage.includes("quota") ||
+                lowerMessage.includes("high demand") ||
+                lowerMessage.includes("too many requests");
+
+            return res.status(
+                isBusyError ? 503 : 500
+            ).json({
+                success: false,
+                message
+            });
+        }
     } catch (error: unknown) {
         next(error);
     }
